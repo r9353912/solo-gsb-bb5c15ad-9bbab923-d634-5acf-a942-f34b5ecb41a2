@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS branches (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 演员名单（按稿件登记）
+CREATE TABLE IF NOT EXISTS cast_members (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  script_id  INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(script_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS branch_segments (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   branch_id  INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
@@ -49,6 +58,7 @@ CREATE TABLE IF NOT EXISTS branch_segments (
   start_ms   INTEGER NOT NULL,
   end_ms     INTEGER NOT NULL,
   text       TEXT NOT NULL,
+  cast_member_id INTEGER REFERENCES cast_members(id) ON DELETE SET NULL, -- 演员归属；NULL=未归属
   rev        INTEGER NOT NULL DEFAULT 1 -- 片段修订计数：文案/时码任一变化即 +1，用于豁免失效
 );
 
@@ -130,6 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_branches_script ON branches(script_id);
 CREATE INDEX IF NOT EXISTS idx_branch_segments_branch ON branch_segments(branch_id);
 CREATE INDEX IF NOT EXISTS idx_segment_sources_bs ON segment_sources(branch_segment_id);
 CREATE INDEX IF NOT EXISTS idx_segment_sources_src ON segment_sources(source_id);
+CREATE INDEX IF NOT EXISTS idx_cast_members_script ON cast_members(script_id);
 CREATE INDEX IF NOT EXISTS idx_qc_rule_versions_script ON qc_rule_versions(script_id);
 CREATE INDEX IF NOT EXISTS idx_qc_reports_branch ON qc_reports(branch_id);
 CREATE INDEX IF NOT EXISTS idx_qc_hits_report ON qc_hits(report_id);
@@ -140,6 +151,10 @@ CREATE INDEX IF NOT EXISTS idx_qc_exemptions_branch ON qc_exemptions(branch_id);
 const segCols = db.prepare('PRAGMA table_info(branch_segments)').all();
 if (!segCols.some((c) => c.name === 'rev')) {
   db.exec('ALTER TABLE branch_segments ADD COLUMN rev INTEGER NOT NULL DEFAULT 1');
+}
+// 旧库迁移：补演员归属列（cast_members 表已在上方幂等建表中创建）
+if (!segCols.some((c) => c.name === 'cast_member_id')) {
+  db.exec('ALTER TABLE branch_segments ADD COLUMN cast_member_id INTEGER REFERENCES cast_members(id) ON DELETE SET NULL');
 }
 
 module.exports = db;

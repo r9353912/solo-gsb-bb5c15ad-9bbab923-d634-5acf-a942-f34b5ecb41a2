@@ -7,18 +7,24 @@
 //   - 拆分区块：1 个来源 -> 多个分支片段
 //   - 合并区块：多个来源 -> 1 个分支片段
 // 遍历来源序号 1..N，对比两条分支在同一区间的区块：
-//   只有一方改动            -> 直接采用该方
-//   双方都触及同一来源区间  -> 冲突，展示双方内容由用户选择
+//   只有一方改动（文案/时码或演员归属任一） -> 直接采用该方（归属随该方继承）
+//   双方都触及同一来源区间：
+//     · 区块结构一致（相同拆分结构）且不存在「双方各指定不同演员」，
+//       并且每个片段的文案至多被一方修改 -> 自动合成（文案取改动方，演员归归属方）；
+//     · 双方在同一区间各自指定了不同演员 -> 冲突，逐处选择采用哪一侧；
+//     · 结构不同或双方改了同一处文案 -> 冲突（沿用原并列展示逻辑）。
 //   双方均未改              -> 保留原稿
 
 /**
- * 取某分支的片段及其来源 seq，按 ord 排序。
+ * 取某分支的片段及其来源 seq 与演员归属，按 ord 排序。
  */
 function getBranchSegments(db, branchId) {
   return db.prepare(`
-    SELECT bs.id, bs.ord, bs.start_ms, bs.end_ms, bs.text,
+    SELECT bs.id, bs.ord, bs.start_ms, bs.end_ms, bs.text, bs.cast_member_id,
+           cm.name AS cast_name,
            GROUP_CONCAT(ss.source_id) AS source_ids
     FROM branch_segments bs
+    LEFT JOIN cast_members cm ON cm.id = bs.cast_member_id
     LEFT JOIN segment_sources ss ON ss.branch_segment_id = bs.id
     WHERE bs.branch_id = ?
     GROUP BY bs.id
@@ -29,6 +35,8 @@ function getBranchSegments(db, branchId) {
     start_ms: row.start_ms,
     end_ms: row.end_ms,
     text: row.text,
+    cast_member_id: row.cast_member_id ?? null,
+    cast_name: row.cast_name ?? null,
     source_ids: row.source_ids ? row.source_ids.split(',').map(Number) : []
   }));
 }
@@ -44,9 +52,17 @@ function segEqualOriginal(seg, src) {
   return seg.start_ms === src.start_ms && seg.end_ms === src.end_ms && seg.text === src.text;
 }
 
+// 片段相对原稿的两类改动：文案/时码（内容）与演员归属
+function segContentChanged(seg, src) {
+  return !segUnchangedSingle(seg, src);
+}
+function segActorChanged(seg) {
+  return seg.cast_member_id != null; // 原稿无归属；只要指定了演员即为归属改动
+}
+
 /**
  * 由分支片段构造区块列表。
- * 区块：{lo,hi,segments,changed}
+ * 区块：{lo,hi,segments,changed,contentChanged,actorChanged}
  * 约定：正常编辑/拆分时每个片段带来源；合并后可能出现一个片段挂多个来源。
  */
 function buildBlocks(segments, srcBySeq) {
@@ -61,13 +77,17 @@ function buildBlocks(segments, srcBySeq) {
       .sort((a, b) => a - b);
     if (!seqs.length) continue;
 
+    const segActor = segActorChanged(seg);
+    const segContent = segContentChanged(seg, srcBySeq.map.get(seqs[0]));
     const last = blocks[blocks.length - 1];
     if (last && seqs.some((q) => last.srcSet.has(q))) {
       last.segments.push(seg);
       seqs.forEach((q) => last.srcSet.add(q));
       last.lo = Math.min(last.lo, seqs[0]);
       last.hi = Math.max(last.hi, seqs[seqs.length - 1]);
-      last.changed = last.changed || !segUnchangedSingle(seg, srcBySeq.map.get(seqs[0]));
+      last.contentChanged = last.contentChanged || segContent;
+      last.actorChanged = last.actorChanged || segActor;
+      last.changed = last.contentChanged || last.actorChanged;
       continue;
     }
 
@@ -76,7 +96,9 @@ function buildBlocks(segments, srcBySeq) {
       hi: seqs[seqs.length - 1],
       srcSet: new Set(seqs),
       segments: [seg],
-      changed: !(seqs.length === 1 && segUnchangedSingle(seg, srcBySeq.map.get(seqs[0])))
+      contentChanged: segContent,
+      actorChanged: segActor,
+      changed: segContent || segActor
     });
   }
   return blocks;
@@ -92,6 +114,8 @@ function segPayload(seg, srcBySeq) {
     start_ms: seg.start_ms,
     end_ms: seg.end_ms,
     text: seg.text,
+    cast_member_id: seg.cast_member_id ?? null,
+    cast_name: seg.cast_name ?? null,
     sources: seg.source_ids
       .map((id) => srcBySeq.idToSeq.get(id))
       .filter((s) => s != null)
@@ -121,15 +145,33 @@ function previewMerge(db, opts) {
   for (const b of blocksB) for (let s = b.lo; s <= b.hi; s++) ofB.set(s, b);
 
   // 1) 用双方区块边界把来源轴切成原子区间，并标注每段：
-  //    'A' 仅 A 改动 / 'B' 仅 B 改动 / 'X' 双方都改（冲突）/ '=' 未改动
+  //    'A' 仅 A 改动 / 'B' 仅 B 改动 / 'X' 双方都改（默认冲突候选）
+  //    'M' 双方都改但可自动合成（结构一致、文案不撞车、演员无分歧）/ '=' 未改动
   const N = sources.length;
   const labelOf = new Map();
+  // 可自动合成的 seq -> 该 seq 上 A/B 两个区块的配对（供输出阶段取数）
+  const mergePair = new Map();
   for (let s = 1; s <= N; s++) {
     const ba = ofA.get(s);
     const bb = ofB.get(s);
     const aChanged = !!(ba && ba.changed);
     const bChanged = !!(bb && bb.changed);
-    labelOf.set(s, aChanged && bChanged ? 'X' : aChanged ? 'A' : bChanged ? 'B' : '=');
+    if (!aChanged && !bChanged) {
+      labelOf.set(s, '=');
+    } else if (aChanged && !bChanged) {
+      labelOf.set(s, 'A');
+    } else if (!aChanged && bChanged) {
+      labelOf.set(s, 'B');
+    } else {
+      // 双方都触及：判断该 seq 所在的两个区块能否自动合成
+      const pair = compatiblePair(ba, bb, srcBySeq);
+      if (pair) {
+        labelOf.set(s, 'M');
+        mergePair.set(s, pair);
+      } else {
+        labelOf.set(s, 'X');
+      }
+    }
   }
 
   // 2) 以连续的 X 段为种子，把所有与之相交的结构块（拆分/合并产生）
@@ -202,6 +244,10 @@ function previewMerge(db, opts) {
         source_start: cur, source_end: hi,
         segments: blocks.flatMap((b) => b.segments).map((g) => segPayload(g, srcBySeq))
       });
+    } else if (label === 'M') {
+      // 双方都触及但可自动合成：沿区块配对逐片段合成（文案取改动方、演员归归属方）
+      const segs = combinePairs(cur, hi, blocksA, blocksB, mergePair, srcBySeq);
+      entries.push({ type: 'auto_merged', source_start: cur, source_end: hi, segments: segs });
     } else {
       const segs = [];
       for (let q = cur; q <= hi; q++) segs.push(origPayload(srcBySeq.map.get(q)));
@@ -230,12 +276,94 @@ function collectBlocks(blocks, lo, hi) {
   return out;
 }
 
+function segSourceSeqs(seg, srcBySeq) {
+  return seg.source_ids
+    .map((id) => srcBySeq.idToSeq.get(id))
+    .filter((q) => q != null)
+    .sort((a, b) => a - b);
+}
+
+/**
+ * 判断双方在同一来源区间上的区块对能否自动合成。
+ * 要求：
+ *   1. 区块来源跨度完全相同（结构一致：同为普通/拆分/合并，片段数相同，对应片段来源相同）；
+ *   2. 不存在「双方都为对应片段指定了不同演员」（演员分歧必须提请逐处选侧）；
+ *   3. 每个对应片段的文案/时码至多被一方修改（双方改同一处文案仍为冲突）。
+ * 满足时返回 {a: blockA, b: blockB}，否则 null。
+ */
+function compatiblePair(ba, bb, srcBySeq) {
+  if (!ba || !bb) return null;
+  if (ba.lo !== bb.lo || ba.hi !== bb.hi) return null;
+  if (ba.segments.length !== bb.segments.length) return null;
+  for (let i = 0; i < ba.segments.length; i++) {
+    const sa = ba.segments[i];
+    const sb = bb.segments[i];
+    const qa = segSourceSeqs(sa, srcBySeq);
+    const qb = segSourceSeqs(sb, srcBySeq);
+    if (qa.length !== qb.length || qa.some((q, k) => q !== qb[k])) return null;
+
+    const src = srcBySeq.map.get(qa[0]);
+    const aContent = !segUnchangedSingle(sa, src);
+    const bContent = !segUnchangedSingle(sb, src);
+    if (aContent && bContent) return null; // 双方改同一处文案/时码 → 冲突
+
+    // 双方各自指定了不同演员 → 演员冲突，不能自动合成
+    if (sa.cast_member_id != null && sb.cast_member_id != null &&
+        sa.cast_member_id !== sb.cast_member_id) {
+      return null;
+    }
+  }
+  return { a: ba, b: bb };
+}
+
+/**
+ * 输出连续 M 标签区间 [cur,hi] 的合成片段：
+ * 沿 A 侧区块顺序，逐个与 B 侧同跨度区块配对（compatiblePair 已保证配对存在）。
+ * 每个片段：文案/时码取相对原稿有改动的一方（双方一致时任取）；演员取有归属的一方。
+ */
+function combinePairs(cur, hi, blocksA, blocksB, mergePair, srcBySeq) {
+  const out = [];
+  const usedB = new Set();
+  for (const ba of blocksA) {
+    if (ba.hi < cur || ba.lo > hi) continue;
+    const pair = mergePair.get(ba.lo);
+    if (!pair || pair.a !== ba) continue;
+    const bb = pair.b;
+    usedB.add(bb);
+    for (let i = 0; i < ba.segments.length; i++) {
+      const sa = ba.segments[i];
+      const sb = bb.segments[i];
+      const seqs = segSourceSeqs(sa, srcBySeq);
+      const src = srcBySeq.map.get(seqs[0]);
+      const aContent = !segUnchangedSingle(sa, src);
+      // 文案：A 改取 A，否则取 B（B 改或双方一致都成立）
+      const contentSeg = aContent ? sa : sb;
+      // 演员：有归属的一方继承；双方一致（compatiblePair 已排除不同值）时任取
+      let castSeg = null;
+      if (sa.cast_member_id != null) castSeg = sa;
+      else if (sb.cast_member_id != null) castSeg = sb;
+      out.push({
+        branch_segment_id: null,
+        start_ms: contentSeg.start_ms,
+        end_ms: contentSeg.end_ms,
+        text: contentSeg.text,
+        cast_member_id: castSeg ? castSeg.cast_member_id : null,
+        cast_name: castSeg ? castSeg.cast_name : null,
+        sources: seqs
+      });
+    }
+  }
+  return out;
+}
+
 function origPayload(src) {
   return {
     branch_segment_id: null,
     start_ms: src.start_ms,
     end_ms: src.end_ms,
     text: src.text,
+    cast_member_id: null,
+    cast_name: null,
     sources: [src.seq]
   };
 }
@@ -268,7 +396,7 @@ function applyMerge(db, opts, resolutions) {
     const branchId = branchInfo.lastInsertRowid;
 
     const insSeg = db.prepare(
-      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text) VALUES (?, ?, ?, ?, ?)'
+      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, cast_member_id) VALUES (?, ?, ?, ?, ?, ?)'
     );
     const insLink = db.prepare(
       'INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)'
@@ -277,6 +405,10 @@ function applyMerge(db, opts, resolutions) {
       'SELECT id, seq FROM source_segments WHERE script_id = ?'
     ).all(opts.scriptId);
     const seqToId = new Map(sourceRows.map((r) => [r.seq, r.id]));
+    // 合成/选择结果携带的 cast_member_id 必须属于本稿件（防止跨稿件引用）
+    const castIds = new Set(
+      db.prepare('SELECT id FROM cast_members WHERE script_id = ?').all(opts.scriptId).map((r) => r.id)
+    );
 
     let ord = 1;
     for (const e of preview.entries) {
@@ -287,7 +419,10 @@ function applyMerge(db, opts, resolutions) {
         segs = e.segments;
       }
       for (const g of segs) {
-        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text);
+        const castId = g.cast_member_id != null && castIds.has(g.cast_member_id)
+          ? g.cast_member_id
+          : null;
+        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text, castId);
         if (g.sources && g.sources.length) {
           for (const seq of g.sources) insLink.run(r.lastInsertRowid, seqToId.get(seq));
         } else {

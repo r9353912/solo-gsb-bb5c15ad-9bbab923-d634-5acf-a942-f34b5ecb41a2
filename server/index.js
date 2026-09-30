@@ -9,6 +9,7 @@ const { parseSrt, validateTimeline, toSrt, msToSrt } = require('./srt');
 const { previewMerge, applyMerge, getBranchSegments } = require('./merge');
 const qc = require('./qc');
 const recut = require('./recut');
+const cast = require('./cast');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -99,7 +100,8 @@ app.get('/api/scripts/:id', (req, res, next) => {
     const branches = db.prepare(
       "SELECT id, name, kind, created_at FROM branches WHERE script_id = ? ORDER BY id"
     ).all(id);
-    res.json({ ...script, sources, branches });
+    const castMembers = cast.listCast(db, id);
+    res.json({ ...script, sources, branches, cast_members: castMembers });
   } catch (e) {
     next(e);
   }
@@ -231,7 +233,7 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
     const cut = readMs(req.body, 'cut_ms');
 
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text, rev FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, rev, cast_member_id FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
     if (!(cut > seg.start_ms && cut < seg.end_ms)) {
@@ -240,12 +242,13 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
 
     db.transaction(() => {
       db.prepare('UPDATE branch_segments SET ord = ord + 1 WHERE branch_id = ? AND ord > ?').run(branchId, seg.ord);
-      // 切点/边界变化：两条都视为新修订，旧豁免不得沿用
+      // 切点/边界变化：两条都视为新修订，旧豁免不得沿用；
+      // 演员归属不变（拆分沿用原演员）
       db.prepare('UPDATE branch_segments SET end_ms = ?, ord = ?, rev = rev + 1 WHERE id = ?')
         .run(cut, seg.ord, segId);
       const newId = db.prepare(
-        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, rev) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text, seg.rev + 1).lastInsertRowid;
+        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, rev, cast_member_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text, seg.rev + 1, seg.cast_member_id).lastInsertRowid;
       const links = db.prepare(
         'SELECT source_id FROM segment_sources WHERE branch_segment_id = ?'
       ).all(segId);
@@ -253,7 +256,7 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
       links.forEach((l) => ins.run(newId, l.source_id));
     })();
 
-    res.status(201).json({ ok: true });
+    res.status(201).json({ ok: true, cast_member_id: seg.cast_member_id ?? null });
   } catch (e) {
     next(e);
   }
@@ -266,16 +269,25 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
     getBranchOr404(branchId);
     const segId = parseInt(req.params.sid, 10);
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, cast_member_id FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
     const next = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text FROM branch_segments WHERE branch_id = ? AND ord = ?'
+      'SELECT id, ord, start_ms, end_ms, text, cast_member_id FROM branch_segments WHERE branch_id = ? AND ord = ?'
     ).get(branchId, seg.ord + 1);
     if (!next) throw httpError(400, '该片段已经是最后一条，无法与下一片段合并');
 
     const joiner = req.body && typeof req.body.joiner === 'string' ? req.body.joiner : ' ';
     const mergedText = `${seg.text}${joiner}${next.text}`;
+
+    // 演员归属：仅当相邻片段演员相同（含双方都未归属）时沿用；
+    // 否则清空归属，并在响应中提示需要重新指定。
+    const sameCast = (seg.cast_member_id ?? null) === (next.cast_member_id ?? null);
+    const inheritedCastId = sameCast ? (seg.cast_member_id ?? null) : null;
+    const castNameRow = inheritedCastId
+      ? db.prepare('SELECT name FROM cast_members WHERE id = ?').get(inheritedCastId)
+      : null;
+    const castCleared = !sameCast && (seg.cast_member_id != null || next.cast_member_id != null);
 
     db.transaction(() => {
       const srcs = db.prepare(`
@@ -286,15 +298,29 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
       db.prepare('DELETE FROM segment_sources WHERE branch_segment_id IN (?, ?)').run(segId, next.id);
       db.prepare('DELETE FROM branch_segments WHERE id = ?').run(next.id);
       // 合并后文案/时码均可能变化：推进保留片段的修订计数，旧豁免失效
-      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, rev = rev + 1 WHERE id = ?')
-        .run(Math.min(seg.start_ms, next.start_ms), Math.max(seg.end_ms, next.end_ms), mergedText, segId);
+      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, cast_member_id = ?, rev = rev + 1 WHERE id = ?')
+        .run(
+          Math.min(seg.start_ms, next.start_ms),
+          Math.max(seg.end_ms, next.end_ms),
+          mergedText,
+          inheritedCastId,
+          segId
+        );
       const ins = db.prepare('INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)');
       srcs.forEach((x) => ins.run(segId, x.source_id));
       db.prepare('UPDATE branch_segments SET ord = ord - 1 WHERE branch_id = ? AND ord > ?')
         .run(branchId, next.ord);
     })();
 
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      cast_member_id: inheritedCastId,
+      cast_name: castNameRow ? castNameRow.name : null,
+      cast_cleared: castCleared,
+      cast_message: castCleared
+        ? '相邻片段演员不同，合并后已清空演员归属，请为合并片段重新指定演员'
+        : (inheritedCastId ? '合并片段沿用原演员' : '两片均未归属演员')
+    });
   } catch (e) {
     next(e);
   }
@@ -334,19 +360,32 @@ app.post('/api/branches/:id/reset-all', (req, res, next) => {
     const branch = getBranchOr404(id);
     if (branch.kind === 'merged') throw httpError(400, '合并结果分支不可整体重置');
     db.transaction(() => {
+      // 重置前按 ord 保留演员归属：重置只还原文案/时码，不改变归属
+      const castByOrd = new Map(
+        db.prepare('SELECT ord, cast_member_id FROM branch_segments WHERE branch_id = ? AND cast_member_id IS NOT NULL')
+          .all(id)
+          .map((r) => [r.ord, r.cast_member_id])
+      );
+      // 仅保留本稿件演员的归属（防御）
+      const validCast = new Set(
+        db.prepare('SELECT id FROM cast_members WHERE script_id = ?').all(branch.script_id).map((r) => r.id)
+      );
       db.prepare('DELETE FROM segment_sources WHERE branch_segment_id IN (SELECT id FROM branch_segments WHERE branch_id = ?)').run(id);
       db.prepare('DELETE FROM branch_segments WHERE branch_id = ?').run(id);
       const sources = db.prepare(
         'SELECT id, start_ms, end_ms, text FROM source_segments WHERE script_id = ? ORDER BY seq'
       ).all(branch.script_id);
       const insSeg = db.prepare(
-        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text) VALUES (?, ?, ?, ?, ?)'
+        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, cast_member_id) VALUES (?, ?, ?, ?, ?, ?)'
       );
       const insLink = db.prepare(
         'INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)'
       );
       sources.forEach((s, i) => {
-        const segId = insSeg.run(id, i + 1, s.start_ms, s.end_ms, s.text).lastInsertRowid;
+        const ord = i + 1;
+        const cid = castByOrd.get(ord);
+        const castId = cid != null && validCast.has(cid) ? cid : null;
+        const segId = insSeg.run(id, ord, s.start_ms, s.end_ms, s.text, castId).lastInsertRowid;
         insLink.run(segId, s.id);
       });
     })();
@@ -477,6 +516,105 @@ app.get('/api/branches/:id/export', (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+// ---------------- 演员归属与走词单 ----------------
+
+// 演员名单
+app.get('/api/scripts/:id/cast', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const script = db.prepare('SELECT id FROM scripts WHERE id = ?').get(id);
+    if (!script) throw httpError(404, '稿件不存在');
+    res.json({ script_id: id, cast_members: cast.listCast(db, id) });
+  } catch (e) { next(e); }
+});
+
+// 登记演员
+app.post('/api/scripts/:id/cast', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const script = db.prepare('SELECT id FROM scripts WHERE id = ?').get(id);
+    if (!script) throw httpError(404, '稿件不存在');
+    const member = cast.createCastMember(db, id, req.body && req.body.name);
+    res.status(201).json({ ok: true, cast_member: member });
+  } catch (e) { next(e); }
+});
+
+// 重命名演员（已归属片段随之显示新姓名）
+app.patch('/api/scripts/:id/cast/:cid', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const cid = parseInt(req.params.cid, 10);
+    const member = cast.renameCastMember(db, id, cid, req.body && req.body.name);
+    res.json({ ok: true, cast_member: member });
+  } catch (e) { next(e); }
+});
+
+// 删除演员（其名下片段归属自动清空，成为未归属片段）
+app.delete('/api/scripts/:id/cast/:cid', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const cid = parseInt(req.params.cid, 10);
+    const removed = cast.deleteCastMember(db, id, cid);
+    res.json({ ok: true, removed });
+  } catch (e) { next(e); }
+});
+
+// 为单个片段指定/清空演员（不改变文案与时码）
+app.put('/api/branches/:id/segments/:sid/cast', (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    const segId = parseInt(req.params.sid, 10);
+    const body = req.body || {};
+    let memberId;
+    if (body.cast_member_id === null || body.cast_member_id === undefined || body.cast_member_id === '') {
+      memberId = null; // 清空归属
+    } else {
+      memberId = parseInt(body.cast_member_id, 10);
+      if (!Number.isInteger(memberId)) throw httpError(400, 'cast_member_id 必须为演员 id、null 或空串');
+    }
+    const result = cast.assignCast(db, branchId, segId, memberId);
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+// 走词单（JSON 预检：逐条给出演员、时码、台词、原稿来源序号）
+app.get('/api/branches/:id/cue-sheet', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    getBranchOr404(id);
+    const sheet = cast.buildCueSheet(db, id, getBranchSegments);
+    cast.assertExportable(sheet); // 有未归属片段或时间线错误时 409，拒绝整份导出
+    res.json({
+      branch: { id: sheet.branch.id, name: sheet.branch.name, kind: sheet.branch.kind },
+      script: { id: sheet.script.id, name: sheet.script.name },
+      total: sheet.lines.length,
+      lines: sheet.lines.map((l) => ({
+        ord: l.ord,
+        actor: l.actor,
+        cast_member_id: l.cast_member_id,
+        start_ms: l.start_ms,
+        end_ms: l.end_ms,
+        text: l.text,
+        source_seqs: l.source_seqs
+      }))
+    });
+  } catch (e) { next(e); }
+});
+
+// 走词单下载（TSV，Excel 可直接打开）；同样先过闸门
+app.get('/api/branches/:id/cue-sheet.tsv', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const branch = getBranchOr404(id);
+    const sheet = cast.buildCueSheet(db, id, getBranchSegments);
+    cast.assertExportable(sheet);
+    const script = db.prepare('SELECT name FROM scripts WHERE id = ?').get(branch.script_id);
+    const fname = `${script.name}-${branch.name}-演员走词单.tsv`;
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fname)}`);
+    res.type('text/tab-separated-values; charset=utf-8').send(cast.toTsv(sheet));
+  } catch (e) { next(e); }
 });
 
 // ---------------- 放映质检 ----------------
@@ -617,6 +755,7 @@ app.use((err, req, res, next) => {
     ...(err.invalid_exemptions ? { invalid_exemptions: err.invalid_exemptions } : {}),
     ...(err.report_stale != null ? { report_stale: err.report_stale } : {}),
     ...(err.recut_errors ? { recut_errors: err.recut_errors } : {}),
+    ...(err.unassigned ? { unassigned: err.unassigned } : {}),
     ...(err.preview_stale != null ? { preview_stale: err.preview_stale } : {})
   });
 });

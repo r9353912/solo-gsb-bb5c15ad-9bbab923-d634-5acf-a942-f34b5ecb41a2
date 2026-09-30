@@ -31,6 +31,7 @@
         <div class="ws-actions">
           <button id="btnViewOriginal">查看原稿</button>
           <a id="btnDownloadOriginal" class="btn" download>下载原稿</a>
+          <button id="btnCast">演员名单</button>
           <button id="btnQcRules">质检规则</button>
           <button id="btnMerge" class="primary">合并两条分支</button>
           <button id="btnDeleteScript" class="danger">删除稿件</button>
@@ -115,6 +116,23 @@
   <menu>
     <button type="button" id="recutCancel">关闭</button>
     <button type="button" class="primary" id="recutSubmit" disabled>确认提交（整体成功或不改动）</button>
+  </menu>
+</dialog>
+
+<!-- 演员名单对话框 -->
+<dialog id="dlgCast">
+  <h3>演员名单</h3>
+  <div class="dlg-body">
+    <p class="meta">为该稿件登记演员姓名；登记后即可在修订/合并分支上为每个字幕片段指定一名演员。删除演员会同时清空该演员在所有片段上的归属（片段变为未归属）。</p>
+    <div class="cast-add">
+      <input type="text" id="castNameInput" placeholder="输入演员姓名后回车或点「登记」" maxlength="60">
+      <button type="button" class="primary" id="castAddBtn">登记</button>
+    </div>
+    <div id="castErrors" class="error-box" hidden></div>
+    <ul id="castList" class="cast-list"></ul>
+  </div>
+  <menu>
+    <button type="button" class="primary" id="castClose">关闭</button>
   </menu>
 </dialog>
 

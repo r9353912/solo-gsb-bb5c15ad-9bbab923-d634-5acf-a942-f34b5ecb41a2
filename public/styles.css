@@ -94,8 +94,34 @@ table.seg-table { width: 100%; border-collapse: collapse; background: var(--pane
 .seg-table tr:hover td { background: #20242f; }
 .col-ord { width: 44px; color: var(--muted); text-align: center; }
 .col-src { width: 110px; }
+.col-cast { width: 150px; }
 .col-time { width: 250px; }
 .col-ops { width: 180px; text-align: right; }
+
+/* 演员归属 */
+.cast-summary {
+  margin: 10px 0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  border: 1px solid var(--border);
+}
+.cast-summary.all-assigned { background: #1f3326; border-color: #2f5a3f; color: #b6f0cb; }
+.cast-summary.has-unassigned { background: #382e1a; border-color: #6b5426; color: #f2d7a0; }
+.cast-summary .cast-order { display: block; color: var(--muted); font-size: 12px; }
+.cast-select {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 5px;
+  padding: 5px 6px;
+  font: inherit;
+  font-size: 12.5px;
+}
+.cast-select.unassigned { border-color: #6b5426; background: #2a2517; }
+tr.row-unassigned td { background: rgba(224,169,75,.05); }
 
 input[type=text], textarea {
   width: 100%;
@@ -135,6 +161,34 @@ dialog label input { margin-top: 6px; }
 menu { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px; margin: 0; border-top: 1px solid var(--border); }
 #dlgMerge { width: 820px; }
 #dlgOriginal { width: 720px; }
+#dlgCast { width: 520px; }
+#dlgCast .dlg-body { padding: 16px 20px; }
+.cast-add { display: flex; gap: 8px; margin: 12px 0; }
+.cast-add input { flex: 1; }
+.cast-list { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow-y: auto; }
+.cast-list li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  background: var(--bg);
+}
+.cast-list .cast-name { font-weight: 600; }
+.cast-list .cast-meta { color: var(--muted); font-size: 12px; flex: 1; }
+.cast-list .cast-empty { color: var(--muted); font-size: 12.5px; border-style: dashed; justify-content: center; }
+.cast-list .cast-row-ops { display: flex; gap: 4px; }
+.danger-link { color: var(--danger) !important; }
+.mini-actor {
+  display: inline-block; margin-left: 8px;
+  background: #2c3450; color: #a9bfff; border-radius: 4px; padding: 0 6px;
+}
+.mini-actor.no-actor { background: #332b1c; color: var(--warn); }
+.mini-src { color: var(--muted); font-size: 11px; }
+.conflict-note {
+  background: #4a2e22; border: 1px solid #6b4030; color: #ffc4ad;
+  border-radius: 5px; padding: 6px 10px; font-size: 12px; margin-bottom: 8px;
+}
 #originalText { max-height: 60vh; overflow: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
 
 .error-box {
