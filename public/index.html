@@ -31,6 +31,7 @@
         <div class="ws-actions">
           <button id="btnViewOriginal">查看原稿</button>
           <a id="btnDownloadOriginal" class="btn" download>下载原稿</a>
+          <button id="btnActors">演员名单</button>
           <button id="btnQcRules">质检规则</button>
           <button id="btnMerge" class="primary">合并两条分支</button>
           <button id="btnDeleteScript" class="danger">删除稿件</button>
@@ -39,6 +40,7 @@
 
       <div class="tabs" id="branchTabs"></div>
       <div id="editor"></div>
+      <div id="cuePanel"></div>
       <div id="qcPanel"></div>
     </div>
   </section>
@@ -146,6 +148,23 @@
   <menu>
     <button type="button" id="qcRulesCancel">取消</button>
     <button type="button" class="primary" id="qcRulesSave">保存规则</button>
+  </menu>
+</dialog>
+
+<!-- 演员名单对话框 -->
+<dialog id="dlgActors">
+  <h3>演员名单</h3>
+  <div class="dlg-body">
+    <p class="meta">为该稿件登记演员姓名。保存后可在片段表格的「演员」列逐条归属；重命名会同步所有分支上的归属显示。</p>
+    <div class="actor-add">
+      <input type="text" id="actorNameInput" placeholder="输入演员姓名，回车或点添加" maxlength="50">
+      <button type="button" class="primary" id="actorAddBtn">添加演员</button>
+    </div>
+    <div id="actorErrors" class="error-box" hidden></div>
+    <ul id="actorList" class="actor-list"></ul>
+  </div>
+  <menu>
+    <button type="button" class="primary" id="actorsClose">完成</button>
   </menu>
 </dialog>
 

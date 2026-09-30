@@ -71,13 +71,15 @@ function parseSeqInput(v, field) {
 }
 
 /**
- * 分支片段状态指纹：与质检报告指纹一致地覆盖身份/顺序/时码/文案/来源，
- * 另纳入 rev，使任何编辑、拆分、合并、重置（片段 id 变化）都使预览令牌失效。
+ * 分支片段状态指纹：覆盖身份/顺序/时码/文案/来源与演员归属，并纳入 rev，
+ * 使任何编辑、拆分、合并、重置（片段 id 变化）或重新指定演员都使预览令牌失效。
+ * （归属变化不推进 rev，但指纹直接纳入 actor_id，令牌同样过期，需重新预览。）
  */
 function recutStateHash(segments, revById) {
   const payload = segments.map((s) => [
     s.id, s.ord, s.start_ms, s.end_ms, s.text,
     (s.source_ids || []).slice().sort((a, b) => a - b),
+    s.actor_id ?? null,
     revById.get(s.id) ?? 1
   ]);
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');

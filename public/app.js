@@ -6,6 +6,8 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const state = {
   scripts: [],
   script: null,        // 稿件详情
+  actors: [],          // 当前稿件演员名单
+  cue: null,           // 当前分支走词单数据
   branchId: null,
   branch: null,        // 当前分支数据
   sourceBySeq: new Map()
@@ -88,6 +90,7 @@ function highlightScript(id) {
 async function openScript(id) {
   state.script = await api(`/api/scripts/${id}`);
   state.sourceBySeq = new Map(state.script.sources.map((s) => [s.seq, s]));
+  await loadActors(id);
   $('#emptyHint').hidden = true;
   $('#workspace').hidden = false;
   $('#scriptTitle').textContent = state.script.name;
@@ -120,6 +123,7 @@ async function selectBranch(id) {
   state.branch = await api(`/api/branches/${id}`);
   renderTabs();
   renderEditor();
+  await refreshCuePanel();
   await refreshQcPanel();
 }
 
@@ -151,12 +155,13 @@ function renderEditor() {
       <button id="btnValidate">导出前检查</button>
       <button id="btnRecut">重剪重排</button>
       <button id="btnResetAll">整条重置为原稿</button>
+      <a class="btn" id="btnCueExport" href="/api/branches/${b.id}/cue-sheet/export" download>下载演员走词单</a>
       <a class="btn" id="btnExport" href="/api/branches/${b.id}/export" download>导出 SRT</a>
     </div>
     <div id="validateResult"></div>
     <table class="seg-table">
       <thead><tr>
-        <th class="col-ord">#</th><th class="col-src">来源片段</th><th>文案</th><th class="col-time">起止时间</th><th class="col-ops">操作</th>
+        <th class="col-ord">#</th><th class="col-src">来源片段</th><th class="col-actor">演员</th><th>文案</th><th class="col-time">起止时间</th><th class="col-ops">操作</th>
       </tr></thead>
       <tbody>`;
 
@@ -166,10 +171,19 @@ function renderEditor() {
       ? seqs.map((q) => `<span class="src-tag">原稿 #${q}</span>`).join('')
       : '<span class="src-tag">无来源</span>';
     const changed = isChanged(seg) ? '<span class="changed-dot">● 已改</span>' : '';
+    const unassigned = seg.actor_id == null;
+    const actorOptions = ['<option value="">— 未归属 —</option>']
+      .concat(state.actors.map((a) =>
+        `<option value="${a.id}" ${a.id === seg.actor_id ? 'selected' : ''}>${esc(a.name)}</option>`))
+      .join('');
     html += `
-      <tr data-id="${seg.id}">
+      <tr data-id="${seg.id}" class="${unassigned ? 'row-unassigned' : ''}">
         <td class="col-ord">${seg.ord}</td>
         <td class="col-src">${tags}${changed}</td>
+        <td class="col-actor">
+          <select data-field="actor" class="${unassigned ? 'actor-missing' : ''}">${actorOptions}</select>
+          ${unassigned ? '<div class="actor-warn">未归属</div>' : ''}
+        </td>
         <td><textarea rows="2" data-field="text">${esc(seg.text)}</textarea></td>
         <td class="col-time">
           <div class="time-row">
@@ -193,6 +207,7 @@ function renderEditor() {
   $('#btnValidate').onclick = runValidate;
   $('#btnRecut').onclick = openRecutDialog;
   $('#btnResetAll').onclick = resetAll;
+  $('#btnCueExport').onclick = (e) => { e.preventDefault(); cueExport(); };
   $('#btnExport').onclick = (e) => {
     // 导出失败时服务器返回 409 JSON，阻止浏览器直接打开错误页
     e.preventDefault();
@@ -205,6 +220,7 @@ function renderEditor() {
     tr.querySelector('[data-act=split]').onclick = () => splitSegment(id);
     tr.querySelector('[data-act=merge]').onclick = () => mergeWithNext(id);
     tr.querySelector('[data-act=reset]').onclick = () => resetSegment(id);
+    tr.querySelector('[data-field=actor]').onchange = (ev) => assignActor(id, ev.target.value === '' ? null : Number(ev.target.value), ev.target);
   });
 }
 
@@ -255,14 +271,42 @@ async function splitSegment(id) {
 }
 
 async function mergeWithNext(id) {
-  if (!confirm('确定与下一片段合并？时间取外边界，文案用空格连接（之后可再编辑）。')) return;
+  if (!confirm('确定与下一片段合并？时间取外边界，文案用空格连接（之后可再编辑）。演员仅在两条相同时沿用，否则会清空并需重新指定。')) return;
   try {
-    await api(`/api/branches/${state.branchId}/segments/${id}/merge-with-next`, {
+    const r = await api(`/api/branches/${state.branchId}/segments/${id}/merge-with-next`, {
       method: 'POST', body: {}
     });
-    toast('已合并', 'ok');
+    toast(r.notice || '已合并', r.notice ? 'error' : 'ok');
     await selectBranch(state.branchId);
   } catch (e) { toast(e.message, 'error'); }
+}
+
+async function assignActor(id, actorId, selectEl) {
+  try {
+    const r = await api(`/api/branches/${state.branchId}/segments/${id}/actor`, {
+      method: 'PUT', body: { actor_id: actorId }
+    });
+    toast(actorId == null ? '已清除演员归属' : '已指定演员', 'ok');
+    // 归属变化不影响文案/时码，但走词单与行内高亮需要刷新；仅刷新走词单面板与该行高亮
+    await refreshCuePanel();
+    await loadActors(state.script.id);
+    const tr = selectEl.closest('tr');
+    tr.classList.toggle('row-unassigned', r.actor_id == null);
+    const warn = tr.querySelector('.actor-warn');
+    if (r.actor_id == null && !warn) {
+      const td = tr.querySelector('.col-actor');
+      const d = document.createElement('div');
+      d.className = 'actor-warn';
+      d.textContent = '未归属';
+      td.appendChild(d);
+    } else if (r.actor_id != null && warn) {
+      warn.remove();
+    }
+    selectEl.classList.toggle('actor-missing', r.actor_id == null);
+  } catch (e) {
+    toast(e.message, 'error');
+    await selectBranch(state.branchId);
+  }
 }
 
 async function resetSegment(id) {
@@ -409,8 +453,11 @@ function renderMergeDialog() {
 }
 
 function renderSegMini(seg) {
+  const actor = seg.actor_name
+    ? `<span class="cue-actor-tag">🎭 ${esc(seg.actor_name)}</span>`
+    : '<span class="cue-actor-tag none">未归属</span>';
   return `<div class="cc-seg">
-    <div class="t">${msToTc(seg.start_ms)} → ${msToTc(seg.end_ms)}</div>
+    <div class="t">${msToTc(seg.start_ms)} → ${msToTc(seg.end_ms)} ${actor}</div>
     <div>${esc(seg.text).replace(/\n/g, '<br>')}</div>
   </div>`;
 }
@@ -449,7 +496,8 @@ function renderMergeEntry(e) {
     const map = {
       unchanged: ['未改动，保留原稿', 'keep'],
       a_only: [`仅 A 修改，自动保留（${esc(mergeState.branch_a.name)}）`, 'a'],
-      b_only: [`仅 B 修改，自动保留（${esc(mergeState.branch_b.name)}）`, 'b']
+      b_only: [`仅 B 修改，自动保留（${esc(mergeState.branch_b.name)}）`, 'b'],
+      both_same: ['双方改动一致（含演员归属），自动保留', 'keep']
     };
     const [label, cls] = map[e.type];
     div.className = 'merge-entry';
@@ -609,6 +657,185 @@ $('#recutSubmit').onclick = async () => {
     if (e.data && e.data.preview_stale) toast('请重新预览后再提交', 'error');
   }
 };
+
+// ---------------- 演员名单 ----------------
+
+async function loadActors(scriptId) {
+  const data = await api(`/api/scripts/${scriptId}/actors`);
+  state.actors = data.actors || [];
+}
+
+$('#btnActors').onclick = async () => {
+  await loadActors(state.script.id);
+  renderActorDialog();
+  $('#actorErrors').hidden = true;
+  $('#dlgActors').showModal();
+  $('#actorNameInput').focus();
+};
+$('#actorsClose').onclick = () => $('#dlgActors').close();
+
+function renderActorDialog() {
+  const ul = $('#actorList');
+  ul.innerHTML = '';
+  if (!state.actors.length) {
+    ul.innerHTML = '<li class="s-meta" style="cursor:default">尚未登记演员</li>';
+    return;
+  }
+  state.actors.forEach((a) => {
+    const li = document.createElement('li');
+    li.innerHTML = `
+      <span class="act-name"></span>
+      <span class="s-meta">${a.assigned_count} 条归属（全部分支）</span>
+      <span class="act-ops">
+        <button type="button" data-op="rename">重命名</button>
+        <button type="button" data-op="del" class="danger-text">删除</button>
+      </span>`;
+    li.querySelector('.act-name').textContent = a.name;
+    li.querySelector('[data-op=rename]').onclick = async () => {
+      const name = prompt('重命名演员（同步显示于所有分支）', a.name);
+      if (name === null) return;
+      try {
+        await api(`/api/scripts/${state.script.id}/actors/${a.id}`, {
+          method: 'PATCH', body: { name }
+        });
+        toast('已重命名', 'ok');
+        await loadActors(state.script.id);
+        renderActorDialog();
+        await selectBranch(state.branchId);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    li.querySelector('[data-op=del]').onclick = async () => {
+      const extra = a.assigned_count
+        ? `该演员当前有 ${a.assigned_count} 条片段归属，删除后这些片段将变为「未归属」。`
+        : '';
+      if (!confirm(`确定删除演员「${a.name}」？${extra}`)) return;
+      try {
+        const r = await api(`/api/scripts/${state.script.id}/actors/${a.id}`, { method: 'DELETE' });
+        toast(`已删除${r.cleared_assignments ? `，清空 ${r.cleared_assignments} 条归属` : ''}`, 'ok');
+        await loadActors(state.script.id);
+        renderActorDialog();
+        await selectBranch(state.branchId);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    ul.appendChild(li);
+  });
+}
+
+async function submitNewActor() {
+  const input = $('#actorNameInput');
+  const name = input.value.trim();
+  if (!name) return toast('演员姓名不能为空', 'error');
+  try {
+    await api(`/api/scripts/${state.script.id}/actors`, { method: 'POST', body: { name } });
+    input.value = '';
+    $('#actorErrors').hidden = true;
+    await loadActors(state.script.id);
+    renderActorDialog();
+    await selectBranch(state.branchId);
+    toast(`已登记演员「${name}」`, 'ok');
+  } catch (e) {
+    const box = $('#actorErrors');
+    box.textContent = e.message;
+    box.hidden = false;
+  }
+}
+$('#actorAddBtn').onclick = submitNewActor;
+$('#actorNameInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); submitNewActor(); }
+});
+
+// ---------------- 演员走词单 ----------------
+
+async function refreshCuePanel() {
+  if (!state.branchId) { $('#cuePanel').innerHTML = ''; return; }
+  try {
+    state.cue = await api(`/api/branches/${state.branchId}/cue-sheet`);
+    renderCuePanel();
+  } catch (e) {
+    $('#cuePanel').innerHTML = '';
+  }
+}
+
+function renderCuePanel() {
+  const panel = $('#cuePanel');
+  const c = state.cue;
+  if (!c) { panel.innerHTML = ''; return; }
+
+  let html = `
+    <div class="qc-head">
+      <div class="qc-title">演员走词单
+        <span class="src-tag">${c.cue_sheet.length} 名演员</span>
+        <span class="src-tag">${c.total_lines} 条片段</span>
+      </div>
+      <div class="qc-actions">
+        <button id="btnCueRefresh">刷新</button>
+        <button id="btnCueDl" class="primary">下载走词单</button>
+      </div>
+    </div>`;
+
+  if (!c.can_export) {
+    const items = [];
+    c.unassigned.forEach((u) => items.push(
+      `<li>片段 #${u.ord}（${u.timecode}）${u.text_excerpt ? `：${esc(u.text_excerpt)}` : ''}</li>`));
+    c.timeline_issues.forEach((i) => items.push(
+      `<li>${i.ord ? `时间线 片段 #${i.ord}：` : '时间线：'}${esc(i.message)}</li>`));
+    html += `<div class="qc-banner bad">✗ 存在 ${c.unassigned.length} 条未归属片段、${c.timeline_issues.length} 处时间线问题，<b>整份走词单导出被拒绝</b>：
+      <ul class="issue-list">${items.join('')}</ul></div>`;
+  } else {
+    html += '<div class="qc-banner ok">✓ 全部片段已归属且时间线无误，可以导出走词单。下方按演员列出走词顺序。</div>';
+  }
+
+  if (!c.cue_sheet.length) {
+    html += '<div class="qc-banner">还没有任何归属。请先在「演员名单」登记演员，并在片段表格的「演员」列逐条指定。</div>';
+  } else {
+    html += c.cue_sheet.map((g) => `
+      <div class="cue-group">
+        <h4>${esc(g.actor_name)}<span class="s-meta">（${g.line_count} 条）</span></h4>
+        <table class="qc-table"><thead><tr>
+          <th class="col-ord">顺序</th><th class="col-cue-tc">时码</th><th>台词</th><th class="col-cue-src">原稿来源</th>
+        </tr></thead><tbody>
+        ${g.lines.map((ln, i) => `
+          <tr>
+            <td class="col-ord">${i + 1}</td>
+            <td class="tc-cell">${ln.timecode}</td>
+            <td>${esc(ln.text).replace(/\n/g, '<br>')}</td>
+            <td>${ln.source_seqs.length ? ln.source_seqs.map((q) => `#${q}`).join(', ') : '—'}</td>
+          </tr>`).join('')}
+        </tbody></table>
+      </div>`).join('');
+  }
+
+  panel.innerHTML = html;
+  $('#btnCueRefresh').onclick = refreshCuePanel;
+  $('#btnCueDl').onclick = cueExport;
+}
+
+async function cueExport() {
+  try {
+    const resp = await fetch(`/api/branches/${state.branchId}/cue-sheet/export`);
+    if (!resp.ok) {
+      const data = await resp.json();
+      const lines = [data.error];
+      (data.unassigned || []).forEach((u) =>
+        lines.push(`· 未归属 片段 #${u.ord}（${u.timecode}）${u.text_excerpt ? '：' + u.text_excerpt : ''}`));
+      (data.timeline_issues || []).forEach((i) =>
+        lines.push(`· 时间线${i.ord ? ` #${i.ord}` : ''}：${i.message}`));
+      return toast(lines.join('\n'), 'error');
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''(.+)$/.exec(cd);
+    const fname = m ? decodeURIComponent(m[1]) : 'cue-sheet.txt';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出演员走词单', 'ok');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
 
 // ---------------- 放映质检 ----------------
 

@@ -16,9 +16,11 @@
  */
 function getBranchSegments(db, branchId) {
   return db.prepare(`
-    SELECT bs.id, bs.ord, bs.start_ms, bs.end_ms, bs.text,
+    SELECT bs.id, bs.ord, bs.start_ms, bs.end_ms, bs.text, bs.actor_id,
+           ac.name AS actor_name,
            GROUP_CONCAT(ss.source_id) AS source_ids
     FROM branch_segments bs
+    LEFT JOIN actors ac ON ac.id = bs.actor_id
     LEFT JOIN segment_sources ss ON ss.branch_segment_id = bs.id
     WHERE bs.branch_id = ?
     GROUP BY bs.id
@@ -29,6 +31,8 @@ function getBranchSegments(db, branchId) {
     start_ms: row.start_ms,
     end_ms: row.end_ms,
     text: row.text,
+    actor_id: row.actor_id,
+    actor_name: row.actor_name,
     source_ids: row.source_ids ? row.source_ids.split(',').map(Number) : []
   }));
 }
@@ -42,6 +46,32 @@ function getSources(db, scriptId) {
 
 function segEqualOriginal(seg, src) {
   return seg.start_ms === src.start_ms && seg.end_ms === src.end_ms && seg.text === src.text;
+}
+
+/**
+ * 单来源片段相对原稿「完全未动」：文案/时码相同且没有演员归属。
+ * 仅指定演员（文案/时码未动）也算一侧改动，合并时由该侧继承归属。
+ */
+function segUnchangedSingle(seg, src) {
+  return !!src && seg.source_ids.length === 1 && seg.actor_id == null && segEqualOriginal(seg, src);
+}
+
+/**
+ * 两个结构块是否完全一致（用于判断双方是否做出相同改动）：
+ * 片段数量、每条的时码/文案/演员归属、来源集合与顺序都相同。
+ */
+function blocksEqual(ga, gb) {
+  if (!ga || !gb || ga.segments.length !== gb.segments.length) return false;
+  for (let i = 0; i < ga.segments.length; i++) {
+    const a = ga.segments[i];
+    const b = gb.segments[i];
+    if (a.start_ms !== b.start_ms || a.end_ms !== b.end_ms ||
+        a.text !== b.text || a.actor_id !== b.actor_id) return false;
+    const sa = a.source_ids.slice().sort((x, y) => x - y).join(',');
+    const sb = b.source_ids.slice().sort((x, y) => x - y).join(',');
+    if (sa !== sb) return false;
+  }
+  return true;
 }
 
 /**
@@ -82,16 +112,14 @@ function buildBlocks(segments, srcBySeq) {
   return blocks;
 }
 
-function segUnchangedSingle(seg, src) {
-  return !!src && seg.source_ids.length === 1 && segEqualOriginal(seg, src);
-}
-
 function segPayload(seg, srcBySeq) {
   return {
     branch_segment_id: seg.id,
     start_ms: seg.start_ms,
     end_ms: seg.end_ms,
     text: seg.text,
+    actor_id: seg.actor_id ?? null,
+    actor_name: seg.actor_name ?? null,
     sources: seg.source_ids
       .map((id) => srcBySeq.idToSeq.get(id))
       .filter((s) => s != null)
@@ -121,7 +149,9 @@ function previewMerge(db, opts) {
   for (const b of blocksB) for (let s = b.lo; s <= b.hi; s++) ofB.set(s, b);
 
   // 1) 用双方区块边界把来源轴切成原子区间，并标注每段：
-  //    'A' 仅 A 改动 / 'B' 仅 B 改动 / 'X' 双方都改（冲突）/ '=' 未改动
+  //    'A' 仅 A 改动 / 'B' 仅 B 改动 / 'X' 双方都改且不一致（冲突）
+  //    'S' 双方都改但完全一致（含演员归属相同）-> 自动保留，不冲突
+  //    '=' 未改动
   const N = sources.length;
   const labelOf = new Map();
   for (let s = 1; s <= N; s++) {
@@ -129,7 +159,11 @@ function previewMerge(db, opts) {
     const bb = ofB.get(s);
     const aChanged = !!(ba && ba.changed);
     const bChanged = !!(bb && bb.changed);
-    labelOf.set(s, aChanged && bChanged ? 'X' : aChanged ? 'A' : bChanged ? 'B' : '=');
+    if (aChanged && bChanged) {
+      labelOf.set(s, blocksEqual(ba, bb) ? 'S' : 'X');
+    } else {
+      labelOf.set(s, aChanged ? 'A' : bChanged ? 'B' : '=');
+    }
   }
 
   // 2) 以连续的 X 段为种子，把所有与之相交的结构块（拆分/合并产生）
@@ -195,10 +229,11 @@ function previewMerge(db, opts) {
     let hi = cur;
     while (hi + 1 <= N && !inConflict(hi + 1) && labelOf.get(hi + 1) === label) hi += 1;
 
-    if (label === 'A' || label === 'B') {
-      const blocks = (label === 'A' ? blocksA : blocksB).filter((b) => b.lo >= cur && b.hi <= hi);
+    if (label === 'A' || label === 'B' || label === 'S') {
+      // S：双方改动完全一致（含相同演员归属），任取一方内容（含归属）即可
+      const blocks = (label === 'B' ? blocksB : blocksA).filter((b) => b.lo >= cur && b.hi <= hi);
       entries.push({
-        type: label === 'A' ? 'a_only' : 'b_only',
+        type: label === 'A' ? 'a_only' : label === 'B' ? 'b_only' : 'both_same',
         source_start: cur, source_end: hi,
         segments: blocks.flatMap((b) => b.segments).map((g) => segPayload(g, srcBySeq))
       });
@@ -236,6 +271,8 @@ function origPayload(src) {
     start_ms: src.start_ms,
     end_ms: src.end_ms,
     text: src.text,
+    actor_id: null,
+    actor_name: null,
     sources: [src.seq]
   };
 }
@@ -268,7 +305,7 @@ function applyMerge(db, opts, resolutions) {
     const branchId = branchInfo.lastInsertRowid;
 
     const insSeg = db.prepare(
-      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text) VALUES (?, ?, ?, ?, ?)'
+      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id) VALUES (?, ?, ?, ?, ?, ?)'
     );
     const insLink = db.prepare(
       'INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)'
@@ -287,7 +324,13 @@ function applyMerge(db, opts, resolutions) {
         segs = e.segments;
       }
       for (const g of segs) {
-        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text);
+        // 演员归属随所选侧片段复制；校验该演员仍属于本稿件，否则留空
+        let actorId = g.actor_id ?? null;
+        if (actorId != null) {
+          const ok = db.prepare('SELECT 1 FROM actors WHERE id = ? AND script_id = ?').get(actorId, opts.scriptId);
+          if (!ok) actorId = null;
+        }
+        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text, actorId);
         if (g.sources && g.sources.length) {
           for (const seq of g.sources) insLink.run(r.lastInsertRowid, seqToId.get(seq));
         } else {

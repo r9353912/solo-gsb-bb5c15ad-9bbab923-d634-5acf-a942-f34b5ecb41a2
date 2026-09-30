@@ -94,8 +94,35 @@ table.seg-table { width: 100%; border-collapse: collapse; background: var(--pane
 .seg-table tr:hover td { background: #20242f; }
 .col-ord { width: 44px; color: var(--muted); text-align: center; }
 .col-src { width: 110px; }
+.col-actor { width: 132px; }
 .col-time { width: 250px; }
 .col-ops { width: 180px; text-align: right; }
+
+/* 演员归属 */
+select {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 5px;
+  padding: 5px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+.actor-warn { color: var(--warn); font-size: 11px; margin-top: 3px; }
+select.actor-missing { border-color: #6b5426; background: #2a2418; }
+tr.row-unassigned td { background: #241f2e; }
+tr.row-unassigned:hover td { background: #2b2438; }
+.cue-actor-tag {
+  display: inline-block;
+  background: #243a36;
+  color: #8fdccb;
+  border-radius: 4px;
+  padding: 0 6px;
+  margin-left: 8px;
+  font-size: 11px;
+}
+.cue-actor-tag.none { background: #332b1c; color: var(--warn); }
 
 input[type=text], textarea {
   width: 100%;
@@ -298,3 +325,37 @@ table.qc-table { width: 100%; border-collapse: collapse; border: 1px solid var(-
 }
 #recutResult .qc-table tr.unchanged td { opacity: .7; }
 #recutResult .qc-table .tc-new { color: #9db8ff; }
+
+/* ---------------- 演员名单 / 走词单 ---------------- */
+#dlgActors { width: 480px; }
+#dlgActors .dlg-body { padding: 16px 20px; }
+.actor-add { display: flex; gap: 8px; margin: 12px 0; }
+.actor-add input { flex: 1; }
+.actor-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 46vh; overflow-y: auto; }
+.actor-list li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; margin-bottom: 6px;
+  background: var(--bg);
+}
+.actor-list .act-name { font-weight: 600; flex: 0 0 auto; }
+.actor-list .s-meta { flex: 1; }
+.actor-list .act-ops { display: flex; gap: 6px; }
+.actor-list .act-ops button { padding: 3px 10px; font-size: 12px; }
+.actor-list .danger-text { color: var(--danger); border-color: #5a3038; }
+
+#cuePanel {
+  margin-top: 22px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px 18px;
+}
+.cue-group { margin-top: 16px; }
+.cue-group h4 { margin: 0 0 8px; font-size: 13px; color: #8fdccb; }
+.cue-group h4 .s-meta { color: var(--muted); font-weight: 400; margin-left: 6px; }
+#cuePanel .qc-table .tc-cell {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11.5px; white-space: nowrap; color: var(--muted);
+}
+#cuePanel .col-cue-tc { width: 190px; }
+#cuePanel .col-cue-src { width: 90px; color: var(--muted); }

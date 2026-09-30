@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS branches (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 演员名单（每份稿件登记，归属按分支片段独立指定）
+CREATE TABLE IF NOT EXISTS actors (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  script_id  INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(script_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS branch_segments (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   branch_id  INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
@@ -49,7 +58,8 @@ CREATE TABLE IF NOT EXISTS branch_segments (
   start_ms   INTEGER NOT NULL,
   end_ms     INTEGER NOT NULL,
   text       TEXT NOT NULL,
-  rev        INTEGER NOT NULL DEFAULT 1 -- 片段修订计数：文案/时码任一变化即 +1，用于豁免失效
+  actor_id   INTEGER REFERENCES actors(id) ON DELETE SET NULL, -- 演员归属（可空=未归属）
+  rev        INTEGER NOT NULL DEFAULT 1 -- 片段修订计数：文案/时码任一变化即 +1，用于豁免失效（归属变化不推进 rev）
 );
 
 -- 来源关联：
@@ -127,6 +137,7 @@ CREATE TABLE IF NOT EXISTS qc_exemptions (
 
 CREATE INDEX IF NOT EXISTS idx_source_segments_script ON source_segments(script_id);
 CREATE INDEX IF NOT EXISTS idx_branches_script ON branches(script_id);
+CREATE INDEX IF NOT EXISTS idx_actors_script ON actors(script_id);
 CREATE INDEX IF NOT EXISTS idx_branch_segments_branch ON branch_segments(branch_id);
 CREATE INDEX IF NOT EXISTS idx_segment_sources_bs ON segment_sources(branch_segment_id);
 CREATE INDEX IF NOT EXISTS idx_segment_sources_src ON segment_sources(source_id);
@@ -141,5 +152,12 @@ const segCols = db.prepare('PRAGMA table_info(branch_segments)').all();
 if (!segCols.some((c) => c.name === 'rev')) {
   db.exec('ALTER TABLE branch_segments ADD COLUMN rev INTEGER NOT NULL DEFAULT 1');
 }
+// 旧库迁移：演员归属列（旧行默认 NULL=未归属）
+if (!segCols.some((c) => c.name === 'actor_id')) {
+  db.exec('ALTER TABLE branch_segments ADD COLUMN actor_id INTEGER');
+}
+
+// 以下索引依赖 actor_id，须在迁移补列之后创建
+db.exec('CREATE INDEX IF NOT EXISTS idx_branch_segments_actor ON branch_segments(actor_id);');
 
 module.exports = db;
